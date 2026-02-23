@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Graph — Finger Tracking</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #0a0a0a;
+            color: #f0f0f0;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+            opacity: 0.35;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .hud-title {
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .hud-sub {
+            font-size: 10px;
+            color: #555;
+            letter-spacing: 2px;
+        }
+
+        .stats {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .stat-row {
+            font-size: 11px;
+            color: #555;
+            margin-bottom: 4px;
+            transition: color 0.3s;
+        }
+
+        .stat-row.active {
+            color: #aaa;
+        }
+
+        .spread-bar {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 200px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .spread-label {
+            font-size: 9px;
+            letter-spacing: 2px;
+            color: #444;
+            margin-bottom: 4px;
+        }
+
+        .spread-track {
+            height: 3px;
+            background: #1a1a1a;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .spread-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #00ff88, #ff6b6b);
+            transition: width 0.15s ease;
+            border-radius: 2px;
+        }
+
+        .start-screen {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            background: #0a0a0a;
+            transition: opacity 0.5s;
+        }
+
+        .start-screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .start-title {
+            font-size: clamp(2rem, 6vw, 4rem);
+            font-weight: 700;
+            letter-spacing: -1px;
+            margin-bottom: 12px;
+        }
+
+        .start-title .accent { color: #00ff88; }
+
+        .start-desc {
+            font-size: 13px;
+            color: #555;
+            margin-bottom: 30px;
+            text-align: center;
+            line-height: 1.6;
+        }
+
+        .start-btn {
+            background: #fff;
+            color: #000;
+            border: none;
+            padding: 14px 40px;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: transform 0.2s, background 0.2s;
+        }
+
+        .start-btn:hover {
+            transform: scale(1.05);
+            background: #00ff88;
+        }
+
+        .loading {
+            font-size: 11px;
+            color: #333;
+            margin-top: 15px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="start-screen" id="startScreen">
+        <div class="start-title">hand<span class="accent">.</span>graph</div>
+        <div class="start-desc">
+            raise your fingers to see connections.<br>
+            no angles. just distance, trails, and vibes.
+        </div>
+        <button class="start-btn" id="startBtn">enable camera</button>
+        <div class="loading" id="loading">loading mediapipe...</div>
+    </div>
+
+    <div class="container">
+        <video id="video" playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div class="hud">
+            <div class="hud-title">hand.graph</div>
+            <div class="hud-sub" id="hudStatus">waiting for hands...</div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-row" id="statFingers">fingers: 0</div>
+            <div class="stat-row" id="statConnections">connections: 0</div>
+            <div class="stat-row" id="statAvgDist">avg distance: —</div>
+        </div>
+
+        <div class="spread-bar">
+            <div class="spread-label">SPREAD</div>
+            <div class="spread-track">
+                <div class="spread-fill" id="spreadFill"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.min.js"></script>
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Finger config
+        const FINGER_TIPS = [8, 12, 16, 20];
+        const FINGER_PIPS = [6, 10, 14, 18];
+        const THUMB_TIP = 4;
+        const THUMB_IP = 3;
+        const FINGER_NAMES = ['T', 'I', 'M', 'R', 'P'];
+
+        const COLORS = [
+            [255, 100, 255],  // thumb - purple
+            [50, 200, 255],   // index - cyan
+            [50, 255, 50],    // middle - green
+            [255, 150, 50],   // ring - orange
+            [255, 50, 50],    // pinky - red
+        ];
+
+        // Trail history
+        const trails = { 0: [], 1: [], 2: [], 3: [], 4: [] };
+        const TRAIL_MAX = 25;
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function isFingerUp(landmarks, tipIdx, pipIdx) {
+            return landmarks[tipIdx].y < landmarks[pipIdx].y;
+        }
+
+        function isThumbUp(landmarks) {
+            return Math.abs(landmarks[THUMB_TIP].x - landmarks[THUMB_IP].x) > 0.03;
+        }
+
+        function dist(p1, p2) {
+            return Math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2);
+        }
+
+        function rgb(arr, alpha = 1) {
+            return `rgba(${arr[0]},${arr[1]},${arr[2]},${alpha})`;
+        }
+
+        function blendColors(c1, c2) {
+            return [
+                (c1[0] + c2[0]) >> 1,
+                (c1[1] + c2[1]) >> 1,
+                (c1[2] + c2[2]) >> 1,
+            ];
+        }
+
+        function drawNode(x, y, label, color) {
+            // glow
+            ctx.beginPath();
+            ctx.arc(x, y, 14, 0, Math.PI * 2);
+            ctx.fillStyle = rgb(color, 0.15);
+            ctx.fill();
+
+            // core
+            ctx.beginPath();
+            ctx.arc(x, y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = rgb(color, 0.9);
+            ctx.fill();
+
+            // ring
+            ctx.beginPath();
+            ctx.arc(x, y, 8, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // label
+            ctx.font = '10px monospace';
+            ctx.fillStyle = rgb(color, 0.8);
+            ctx.textAlign = 'center';
+            ctx.fillText(label, x, y - 16);
+        }
+
+        function drawMeasurementLine(p1, p2, distance, color) {
+            // line
+            ctx.beginPath();
+            ctx.moveTo(p1[0], p1[1]);
+            ctx.lineTo(p2[0], p2[1]);
+            ctx.strokeStyle = rgb(color, 0.4);
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // midpoint label
+            const mx = (p1[0] + p2[0]) / 2;
+            const my = (p1[1] + p2[1]) / 2;
+            const label = `${Math.round(distance)}px`;
+
+            ctx.font = '10px monospace';
+            const tw = ctx.measureText(label).width;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(mx - tw / 2 - 4, my - 7, tw + 8, 14);
+
+            ctx.fillStyle = rgb(color, 0.9);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, mx, my);
+            ctx.textBaseline = 'alphabetic';
+        }
+
+        function drawTrail(points, color) {
+            if (points.length < 2) return;
+            for (let i = 1; i < points.length; i++) {
+                const alpha = (i / points.length) * 0.5;
+                const width = (i / points.length) * 3;
+                ctx.beginPath();
+                ctx.moveTo(points[i - 1][0], points[i - 1][1]);
+                ctx.lineTo(points[i][0], points[i][1]);
+                ctx.strokeStyle = rgb(color, alpha);
+                ctx.lineWidth = width;
+                ctx.stroke();
+            }
+        }
+
+        function drawSkeleton(landmarks) {
+            // Draw finger bones for raised fingers
+            const FINGER_CHAINS = [
+                [0, 1, 2, 3, 4],         // thumb
+                [0, 5, 6, 7, 8],         // index
+                [0, 9, 10, 11, 12],      // middle
+                [0, 13, 14, 15, 16],     // ring
+                [0, 17, 18, 19, 20],     // pinky
+                [5, 9], [9, 13], [13, 17] // palm connections
+            ];
+
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.lineWidth = 1;
+
+            for (const chain of FINGER_CHAINS) {
+                ctx.beginPath();
+                for (let i = 0; i < chain.length; i++) {
+                    const lm = landmarks[chain[i]];
+                    const x = (1 - lm.x) * w;
+                    const y = lm.y * h;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // small dots at each landmark
+            for (let i = 0; i < landmarks.length; i++) {
+                const lm = landmarks[i];
+                const x = (1 - lm.x) * w;
+                const y = lm.y * h;
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255,255,255,0.08)';
+                ctx.fill();
+            }
+        }
+
+        function onResults(results) {
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                document.getElementById('hudStatus').textContent = 'waiting for hands...';
+                document.getElementById('statFingers').textContent = 'fingers: 0';
+                document.getElementById('statConnections').textContent = 'connections: 0';
+                document.getElementById('statAvgDist').textContent = 'avg distance: —';
+                document.getElementById('spreadFill').style.width = '0%';
+                // clear all trails
+                for (let i = 0; i < 5; i++) trails[i] = [];
+                return;
+            }
+
+            document.getElementById('hudStatus').textContent = `tracking ${results.multiHandLandmarks.length} hand${results.multiHandLandmarks.length > 1 ? 's' : ''}`;
+
+            const activeTips = [];
+
+            for (const landmarks of results.multiHandLandmarks) {
+                // Draw subtle skeleton
+                drawSkeleton(landmarks);
+
+                // Check thumb
+                if (isThumbUp(landmarks)) {
+                    const x = (1 - landmarks[THUMB_TIP].x) * w;
+                    const y = landmarks[THUMB_TIP].y * h;
+                    activeTips.push({ name: 'T', pos: [x, y], idx: 0 });
+                    trails[0].push([x, y]);
+                    if (trails[0].length > TRAIL_MAX) trails[0].shift();
+                } else {
+                    trails[0] = [];
+                }
+
+                // Check fingers
+                for (let i = 0; i < FINGER_TIPS.length; i++) {
+                    if (isFingerUp(landmarks, FINGER_TIPS[i], FINGER_PIPS[i])) {
+                        const x = (1 - landmarks[FINGER_TIPS[i]].x) * w;
+                        const y = landmarks[FINGER_TIPS[i]].y * h;
+                        activeTips.push({ name: FINGER_NAMES[i + 1], pos: [x, y], idx: i + 1 });
+                        trails[i + 1].push([x, y]);
+                        if (trails[i + 1].length > TRAIL_MAX) trails[i + 1].shift();
+                    } else {
+                        trails[i + 1] = [];
+                    }
+                }
+            }
+
+            // Clear trails for inactive fingers
+            const activeIdxs = activeTips.map(t => t.idx);
+            for (let i = 0; i < 5; i++) {
+                if (!activeIdxs.includes(i)) trails[i] = [];
+            }
+
+            // Draw trails
+            for (let i = 0; i < 5; i++) {
+                drawTrail(trails[i], COLORS[i]);
+            }
+
+            // Draw measurement lines between all pairs
+            let totalDist = 0;
+            let numConns = 0;
+
+            for (let i = 0; i < activeTips.length; i++) {
+                for (let j = i + 1; j < activeTips.length; j++) {
+                    const d = dist(activeTips[i].pos, activeTips[j].pos);
+                    totalDist += d;
+                    numConns++;
+                    const blend = blendColors(COLORS[activeTips[i].idx], COLORS[activeTips[j].idx]);
+                    drawMeasurementLine(activeTips[i].pos, activeTips[j].pos, d, blend);
+                }
+            }
+
+            // Draw nodes on top
+            for (const tip of activeTips) {
+                drawNode(tip.pos[0], tip.pos[1], tip.name, COLORS[tip.idx]);
+            }
+
+            // Update stats
+            document.getElementById('statFingers').textContent = `fingers: ${activeTips.length}`;
+            document.getElementById('statFingers').className = `stat-row ${activeTips.length > 0 ? 'active' : ''}`;
+            document.getElementById('statConnections').textContent = `connections: ${numConns}`;
+            document.getElementById('statConnections').className = `stat-row ${numConns > 0 ? 'active' : ''}`;
+
+            if (numConns > 0) {
+                const avg = totalDist / numConns;
+                document.getElementById('statAvgDist').textContent = `avg distance: ${Math.round(avg)}px`;
+                document.getElementById('statAvgDist').className = 'stat-row active';
+
+                // Spread bar
+                const maxD = Math.sqrt(w * w + h * h);
+                const spreadPct = Math.min(100, (avg / maxD) * 200);
+                document.getElementById('spreadFill').style.width = `${spreadPct}%`;
+            } else {
+                document.getElementById('statAvgDist').textContent = 'avg distance: —';
+                document.getElementById('statAvgDist').className = 'stat-row';
+                document.getElementById('spreadFill').style.width = '0%';
+            }
+        }
+
+        // Start
+        document.getElementById('startBtn').addEventListener('click', async () => {
+            const loadEl = document.getElementById('loading');
+            loadEl.style.display = 'block';
+            document.getElementById('startBtn').style.display = 'none';
+
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.5,
+            });
+
+            hands.onResults(onResults);
+
+            const camera = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({ image: video });
+                },
+                width: 1280,
+                height: 720,
+            });
+
+            await camera.start();
+            document.getElementById('startScreen').classList.add('hidden');
+        });
+    </script>
+</body>
+</html>
